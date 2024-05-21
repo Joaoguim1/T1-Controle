@@ -1,0 +1,251 @@
+##VERSAO02
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import control as clt
+from scipy.integrate import solve_ivp
+from scipy.signal import place_poles
+from scipy.linalg import eigvals
+# Definir as matrizes do sistema
+# definição parâmetros
+k_p = 105e3  # N/m
+k_m = 30.25e3  # N/m
+k_cinto = 52.5e3  # N/m
+K = 21.678  # Nm/rad
+k_b = 40e3  # N/m
+b_b = 220 #Ns/m
+b_p = 325  # Ns/m
+b_m = 2408.04  # Ns/m
+b_cinto = 250  # Ns/m
+B = 2.4692  # Nms/rad
+l = 0.19  # m
+M_total = 70  # kg
+M_t = 42.609  # kg
+M_m = 21.238  # kg
+M_c = 6.153  # kg
+J_c = 0.02  # kgm^2
+M_b = 35  # kg
+g = 9.81 #m/s^2
+
+# Definindo as matrizes
+n1 = ((1+M_c*l*M_c*l)/(J_c+M_c*l**2)/(M_c+M_m))**(-1)
+n2 = (-M_c*l/(J_c+M_c*l**2))
+n3 = (M_c+M_m+((M_c**2)*(l**2))/(J_c+M_c*l**2))
+A = np.array([
+    [0, 0, 0, 0, 1, 0, 0, 0],
+    [0, 0, 0, 0, 0, 1, 0, 0],
+    [0, 0, 0, 0, 0, 0, 1, 0],
+    [0, 0, 0, 0, 0, 0, 0, 1],
+    [-(k_b+k_cinto)/M_b, (k_cinto)/M_b, 0, 0, -(b_b+b_cinto)/M_b, b_cinto/M_b, 0, 0],
+    [k_cinto*n3, -(k_cinto+k_m)*n3, k_m*n3, M_c*l*(M_c*l*g-K)/(J_c+M_c*l**2)*n3, b_cinto/(M_t+M_c), -(b_cinto+b_m)/(M_t+M_c), b_m/(M_t+M_c), -B*n3/(J_c+M_c*l**2)],
+    [0, k_m/M_m, -(k_m+k_p)/M_m, 0, 0, b_m/M_m, -(b_m+b_p)/M_m, 0],
+    [n1*n2*k_cinto, n1*n2*(-k_cinto-k_m), k_m*n1*n2, (M_c*l*g-K)/(J_c+M_c*l**2), n1*n2*b_cinto, (-b_cinto-b_m)*n1*n2, b_m*n1*n2, -B/(J_c+M_c*l**2)]
+])
+
+B = np.array([
+    [0],
+    [0],
+    [0],
+    [0],
+    [1/M_b],
+    [0],
+    [0],
+    [0]
+])
+
+E = np.array([
+    [0, 0],
+    [0, 0],
+    [0, 0],
+    [0, 0],
+    [k_b/M_b, b_b/M_b],
+    [0, 0],
+    [k_p/M_m, b_p/M_m],
+    [0, 0],
+])
+
+import control as clt
+n = A.shape[0]
+# Verificação da controlabilidade do sistema
+MC=clt.ctrb(A, B)
+pMC=np.linalg.matrix_rank(MC,tol=0.0000000001**1000000000)
+if pMC == n:
+    print("O sistema é controlável")
+
+# Definir as funções de entrada e perturbação
+def c(t):
+    return 2 + np.sin(2 * np.pi * t)
+## Velocidade e deslocamento na aceleração
+def deslocamentoNaColisao(t, L, k, t0):
+    return L / (1 + np.exp(-k * (t - t0)))
+
+def velocidadeNaColisao(t):
+    v = 50/3.6 #m/s
+    b = v**2
+    a = (-b)/.3
+    if np.isscalar(t):
+        if t <= 0.3:
+            quadratic_part = a * t + b
+            return np.sqrt(max(quadratic_part, 0))
+        else:
+            return 0
+    else:
+        f_t = np.zeros_like(t)
+        quadratic_part = a * t + b
+        f_t[t <= 0.3] = np.sqrt(np.maximum(quadratic_part[t <= 0.3], 0))
+        f_t[t > 0.3] = 0
+        return f_t
+    return f_t
+
+def w(t):
+    # Parâmetros da função logística
+    L = 1.6  # Valor de estabilização
+    k = 20   # Taxa de crescimento, ajustada para o intervalo desejado
+    t0 = 0.01  # Ponto de inflexão ajustado para o intervalo desejado
+    deslocamento = deslocamentoNaColisao(t, L, k, t0)
+    velocidade = velocidadeNaColisao(t)
+    return np.array([-deslocamento, -velocidade])
+
+# Função que descreve a dinâmica do sistema sem controle
+def dinamicaSistemaSemControle(t, x):
+    x = np.reshape(x, (-1, 1))  # Garantir que x é uma coluna
+    dxdt = A @ x + B * (c(t)* w(t)[1]) + E @ w(t).reshape(-1, 1)
+    return dxdt.flatten()  # Retornar como vetor de 1D
+
+
+# Aplicando controle por alocação de polos 
+# Definir os polos desejados
+desired_poles = np.array([
+ -150    +   4000j   ,  -150   - 4000j,
+ -10     +   79j     ,  -10    - 79j,
+ -99     +   0j      ,  -160   + 0j ,
+ -150    +   0j      ,  -90    - 0j        
+ ])
+
+# Calcular a matriz de ganho K
+result = place_poles(A, B, desired_poles)
+K = result.gain_matrix
+Acl = A - B @ K
+def dinamicaSistemaComControle(t, x):
+    x = np.reshape(x, (-1, 1))  # Garantir que x é uma coluna
+    dxdt = Acl @ x + B * (c(t)* w(t)[1]) + E @ w(t).reshape(-1, 1)
+    return dxdt.flatten()  # Retornar como vetor de 1D
+
+# Aplicando controle por LQR
+Q = 1e10*np.diag([.0002,5,1,0,0,.0025,0,0])  # Matriz de ponderação dos estados
+R = np.array([[1]])  # Matriz de ponderação da entrada
+
+KLQR, _, _ = clt.lqr(A, B, Q, R)
+
+# Nova dinâmica do sistema com controle por LQR
+AclLQR = A - B @ KLQR
+def dinamicaSistemaComLQR(t, x):
+    x = np.reshape(x, (-1, 1))  # Garantir que x é uma coluna
+    dxdt = AclLQR @ x + B * (c(t) * w(t)[1]) + E @ w(t).reshape(-1, 1)
+    return dxdt.flatten()  # Retornar como vetor de 1D
+
+
+# Definir as condições iniciais e o intervalo de tempo
+x0 = np.zeros(8)  # Condições iniciais (vetor de zeros com dimensão 8)
+t_span = (0,3)  # Intervalo de tempo
+t_eval = np.linspace(t_span[0], t_span[1], 500)  # Pontos de avaliação
+
+# Solução das equações diferenciais 
+sol1 = solve_ivp(dinamicaSistemaSemControle, t_span, x0, t_eval=t_eval, vectorized=True)
+sol2 = solve_ivp(dinamicaSistemaComControle, t_span, x0, t_eval=t_eval, vectorized=True)
+sol3 = solve_ivp(dinamicaSistemaComLQR, t_span, x0, t_eval=t_eval, vectorized=True)
+
+# Extrair os resultados relevantes
+xb1 = sol1.y[0]  # Deslocamento do banco (x_b)
+xb_dot1 = sol1.y[4]  # Velocidade do banco (dx_b/dt)
+# Resultado com controle por alocação de polos
+xb2 = sol2.y[0]  # Deslocamento do banco (x_b)
+xb_dot2 = sol2.y[4]  # Velocidade do banco (dx_b/dt)
+xb3 = sol3.y[0]  # Deslocamento do banco (x_b)
+xb_dot3 = sol3.y[4]  # Velocidade do banco (dx_b/dt)
+
+# Aceleração do banco (ddx_b/dt^2) a partir da derivada da velocidade dx_b/dt
+xb_ddot1 = np.zeros_like(xb_dot1)
+for i in range(len(sol1.t)):
+    xb_ddot1[i] = (A[4, :] @ sol1.y[:, i] + B[4, :] * (c(sol1.t[i])*w(sol1.t[i])[1]) + E[4, :] @ w(sol1.t[i])).item()
+# Aceleração do banco (ddx_b/dt^2) a partir da derivada da velocidade dx_b/dt com controle
+xb_ddot2 = np.zeros_like(xb_dot2)
+for i in range(len(sol2.t)):
+    xb_ddot2[i] = (A[4, :] @ sol2.y[:, i] + B[4, :] * (c(sol2.t[i])*w(sol2.t[i])[1]) + E[4, :] @ w(sol2.t[i])).item()
+# Aceleração do banco (ddx_b/dt^2) a partir da derivada da velocidade dx_b/dt com controle
+xb_ddot3 = np.zeros_like(xb_dot3)
+for i in range(len(sol2.t)):
+    xb_ddot3[i] = (A[4, :] @ sol3.y[:, i] + B[4, :] * (c(sol3.t[i])*w(sol3.t[i])[1]) + E[4, :] @ w(sol3.t[i])).item()
+
+#Aceleração do troco com e sem controle
+#Sem controle
+xt_dot1 = sol1.y[5] 
+xt_ddot1 = np.zeros_like(xb_dot1)
+for i in range(len(sol1.t)):
+    xt_ddot1[i] = (A[5, :] @ sol1.y[:, i] + B[5, :] * (c(sol1.t[i])*w(sol1.t[i])[1]) + E[5, :] @ w(sol1.t[i])).item()
+xt_dot2 = sol2.y[5] 
+#Com controle
+xt_ddot2 = np.zeros_like(xb_dot2)
+for i in range(len(sol2.t)):
+    xt_ddot2[i] = (A[5, :] @ sol2.y[:, i] + B[5, :] * (c(sol2.t[i])*w(sol2.t[i])[1]) + E[5, :] @ w(sol2.t[i])).item()
+xt_dot1 = sol1.y[5] 
+xt_ddot3 = np.zeros_like(xb_dot3)
+for i in range(len(sol3.t)):
+    xt_ddot3[i] = (A[5, :] @ sol3.y[:, i] + B[5, :] * (c(sol3.t[i])*w(sol3.t[i])[1]) + E[5, :] @ w(sol3.t[i])).item()
+
+
+plt.figure(0, figsize=(12, 8))
+plt.plot(sol1.t, xb1, label='Deslocamento do banco (Original)', color='blue')
+plt.plot(sol2.t, xb2, label='Deslocamento do banco (Alocação de polos)', color='black')
+plt.plot(sol3.t, xb3, label='Deslocamento do banco (LQR)', color='orange')
+plt.xlabel('Tempo (s)')
+plt.ylabel('Deslocamento (m)')
+plt.legend()
+plt.grid(True)
+
+plt.figure(1, figsize=(12, 8))
+plt.plot(sol1.t, xb_ddot1, label='Aceleração do banco (Original)', color='red')
+plt.plot(sol2.t, xb_ddot2, label='Aceleração do banco (Alocação de polos)', color='black')
+plt.plot(sol3.t, xb_ddot3, label='Aceleração do banco (LQR)', color='orange')
+plt.xlabel('Tempo (s)')
+plt.ylabel('Aceleração (m/s^2)')
+plt.legend()
+plt.grid(True)
+
+plt.figure(2, figsize=(12, 8))
+plt.plot(sol1.t, xt_ddot1, label='Aceleração do tronco (Original)', color='red')
+plt.plot(sol2.t, xt_ddot2, label='Aceleração do tronco (Alocação de polos)', color='black')
+plt.plot(sol3.t, xt_ddot3, label='Aceleração do tronco (LQR)', color='orange')
+plt.xlabel('Tempo (s)')
+plt.ylabel('Aceleração (m/s^2)')
+plt.legend()
+plt.grid(True)
+
+poles = eigvals(A)
+polesF = eigvals(Acl)
+# Plotar os polos
+plt.figure(3)
+plt.scatter(poles.real, poles.imag, color='red', marker='x')
+# Configurar o gráfico
+plt.title('Mapa de Polos do Sistema em Malha Aberta')
+plt.xlabel('Parte Real')
+plt.ylabel('Parte Imaginária')
+plt.axhline(0, color='black',linewidth=0.5)
+plt.axvline(0, color='black',linewidth=0.5)
+plt.grid(True)
+plt.show()
+
+plt.figure(4)
+plt.scatter(polesF.real, polesF.imag, color='red', marker='x')
+# Configurar o gráfico
+plt.title('Mapa de Polos do Sistema em Malha Fechada')
+plt.xlabel('Parte Real')
+plt.ylabel('Parte Imaginária')
+plt.axhline(0, color='black',linewidth=0.5)
+plt.axvline(0, color='black',linewidth=0.5)
+plt.grid(True)
+plt.show()
+
+plt.tight_layout()
+plt.show()
